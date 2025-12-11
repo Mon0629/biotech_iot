@@ -1,9 +1,17 @@
-from scripts.mqtt_client import init_mqtt
+from mqtt.subscriber import main as subscriber_main
+import time
+
 
 def main():
-    """Start main.py"""
-    init_mqtt()
+    subscriber_main()
+    print("MQTT client initialized, waiting for messages...")
+
+    try:
+        while True:
+            time.sleep(1)  # keep script alive
+    except KeyboardInterrupt:
+        print("Exiting...")
 
 if __name__ == "__main__":
-    # Check if Pi is already on a WiFi network
     main()
+

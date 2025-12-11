@@ -1,15 +1,10 @@
 # scripts/mqtt_client.py
 import paho.mqtt.client as mqtt
 from threading import Thread
-
-MQTT_BROKER = "960858f8c9cd49548edc44f8b9fac4e9.s1.eu.hivemq.cloud"
-MQTT_PORT = 8883
-MQTT_USER = "Biotech"
-MQTT_PASS = "Momorevillame24"
+from config import config
 
 client = None
 _callbacks = {}  # topic -> callback function
-
 
 def _on_connect(c, userdata, flags, rc):
     print("MQTT connected with code", rc)
@@ -34,17 +29,17 @@ def init_mqtt():
         return client
 
     client = mqtt.Client()
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.username_pw_set(config.MQTT_USER, config.MQTT_PASSWORD)
     client.tls_set()
 
     client.on_connect = _on_connect
     client.on_message = _on_message
 
-    client.connect(MQTT_BROKER, MQTT_PORT)
+    client.connect(config.MQTT_BROKER, config.MQTT_PORT)
     
     # Run loop in background thread
-    t = Thread(target=client.loop_forever, daemon=True)
-    t.start()
+    client.loop_start()
+    print("clientstarted")
     
     return client
 

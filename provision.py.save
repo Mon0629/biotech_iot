@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 import subprocess
-from fastapi import FastAPI, Request, BackgroundTasks
-import uvicorn
-import json
-import os
+from fastapi import FastAPI, Request, Background config.device_config from
 
-config_path = os.path.join(os.path.dirname(__file__), 'config', 'device_config.json')
 app = FastAPI()
 
 HOTSPOT_NAME = "BIOTECH"
 HOTSPOT_PASSWORD = "momorevillame24"
 
-
-with open(config_path, 'r') as f:
-    data = json.load(f)
-
-print(data)
 
 def start_ap_mode():
     """Start NetworkManager hotspot for provisioning."""
@@ -87,7 +78,7 @@ async def provision_wifi(request: Request, background_tasks: BackgroundTasks):
     background_tasks.add_task(switch_wifi, ssid, password)
 
     # Send response BEFORE breaking the hotspot
-    return {"status": "ok", "message": f"Provisioning started for {ssid}", "device": data}
+    return {"status": "ok", "message": f"Provisioning started for {ssid}"}
 
 
 if __name__ == "__main__":

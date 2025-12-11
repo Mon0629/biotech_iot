@@ -3,6 +3,7 @@ import paho.mqtt.client as mqtt
 from threading import Thread
 from config import config
 
+
 client = None
 _callbacks = {}  # topic -> callback function
 

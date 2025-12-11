@@ -52,3 +52,13 @@ def subscribe(topic, callback):
     _callbacks[topic] = callback
     if client is not None:
         client.subscribe(topic)
+
+def publish(topic, message, QoS=0, retain=False):
+    """
+    params: topic, Message Payload(string), Quality of Service= (0,1,2) retained true or false
+    """
+
+    if client is None:
+        raise RuntimeError("MQTTclient not initialized")
+    client.publish(topic, payload=message, qos=QoS, retain=retain)
+    print(f"[MQTT] Message published to {topic}: {message}")

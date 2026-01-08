@@ -79,30 +79,36 @@ def connect_to_wifi(ssid: str, password: str) -> bool:
     return result.returncode == 0
 
 
-def switch_wifi(ssid: str, password: str, pairing_token: str):
-    """Switch from AP mode to WiFi client mode."""
-    print("Switching WiFi...")
-    success = connect_to_wifi(ssid, password)
-    if not success:
-        print(f"Failed to connect to {ssid}")
-        return {"status": "error", "message": f"Failed to connect to {ssid}"}
+def connect_to_wifi(ssid: str, password: str) -> bool:
+    """Connect Pi to WiFi using NetworkManager with detailed logging."""
+    print(f"Attempting to connect to WiFi SSID: '{ssid}'")
 
-    print(f"Connected to {ssid}, stopping AP mode...")
-    stop_ap_mode()
+    # Delete old config if it exists
+    del_result = subprocess.run(
+        ["nmcli", "connection", "delete", ssid],
+        capture_output=True, text=True
+    )
+    print(f"Deleted old connection '{ssid}' stdout:\n{del_result.stdout}")
+    print(f"Deleted old connection '{ssid}' stderr:\n{del_result.stderr}")
 
-    # Commented out backend provisioning for now
-    # API_URL = os.getenv("BACKEND_API_URL")
-    # payload = {
-    #     "machine_name": device_config.get("machine_name"),
-    #     "serial_number": device_config.get("serial_number"),
-    #     "model": device_config.get("model"),
-    #     "firmware_version": device_config.get("firmware_version"),
-    #     "pairing_token": pairing_token
-    # }
-    # response = requests.post(f"{API_URL}/devices/provision", json=payload)
-    # print("Backend response:", response.text)
+    # Attempt connection
+    result = subprocess.run(
+        ["nmcli", "-f", "ALL", "device", "wifi", "connect", ssid, "password", password, "ifname", "wlan0"],
+        capture_output=True, text=True
+    )
 
-    return {"status": "ok", "message": f"Connected to {ssid}"}
+    print("===== WiFi connection attempt =====")
+    print("STDOUT:\n", result.stdout)
+    print("STDERR:\n", result.stderr)
+    print("Return code:", result.returncode)
+    print("=================================")
+
+    if result.returncode != 0:
+        # If it fails, run `nmcli` general status to give full debug info
+        status = subprocess.run(["nmcli", "device", "status"], capture_output=True, text=True)
+        print("Device status after failed connection:\n", status.stdout)
+
+    return result.returncode == 0
 
 
 @app.post("/provision")

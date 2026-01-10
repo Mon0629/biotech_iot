@@ -6,13 +6,15 @@ import threading
 import logging
 import os
 import uvicorn
+import json
+import requests
 
 # ---------------- CONFIG ----------------
 
 WIFI_INTERFACE = "wlan0"
-AP_CONNECTION_NAME = "AP-setup"
 FACTORY_RESET_FLAG = "/boot/factory_reset"
 CHECK_INTERVAL = 10  # seconds
+BACKEND_URL = "https://your-backend-domain.com/api/device-config"  # Replace with your Laravel endpoint
 
 # ---------------- APP ----------------
 
@@ -47,30 +49,44 @@ def has_saved_wifi() -> bool:
     """
     result = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
     for line in result.stdout.splitlines():
-        if line.endswith(":wifi") and not line.startswith(AP_CONNECTION_NAME):
+        if line.endswith(":wifi"):
             return True
     return False
 
 def start_ap():
-    logging.info("Starting AP mode")
-    subprocess.run(
-        ["nmcli", "connection", "up", AP_CONNECTION_NAME],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    logging.info("Starting AP mode (hostapd)")
+    subprocess.run(["sudo", "systemctl", "start", "hostapd"], check=False)
 
 def stop_ap():
-    logging.info("Stopping AP mode")
-    subprocess.run(
-        ["nmcli", "connection", "down", AP_CONNECTION_NAME],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    logging.info("Stopping AP mode (hostapd)")
+    subprocess.run(["sudo", "systemctl", "stop", "hostapd"], check=False)
 
 def clear_factory_reset_flag():
     if os.path.exists(FACTORY_RESET_FLAG):
         os.remove(FACTORY_RESET_FLAG)
         logging.info("Factory reset flag cleared")
+
+def send_device_config():
+    """
+    Sends device_config.json to backend after Wi-Fi is connected.
+    """
+    config_path = os.path.join(os.path.dirname(__file__), "config", "device_config.json")
+    if not os.path.exists(config_path):
+        logging.error("device_config.json not found")
+        return
+
+    with open(config_path, "r") as f:
+        config_data = json.load(f)
+
+    try:
+        logging.info(f"Sending device config to backend at {BACKEND_URL}")
+        response = requests.post(BACKEND_URL, json=config_data, timeout=10)
+        if response.status_code == 200:
+            logging.info("Device config sent successfully")
+        else:
+            logging.error(f"Backend returned status {response.status_code}: {response.text}")
+    except requests.RequestException as e:
+        logging.error(f"Failed to send device config: {e}")
 
 # ---------------- STARTUP LOGIC ----------------
 
@@ -94,14 +110,27 @@ def startup_logic():
 
 def wifi_monitor():
     """
-    If Wi-Fi drops at runtime, AP is enabled.
+    Monitors Wi-Fi. If Wi-Fi drops at runtime, starts AP automatically.
+    Stops AP when Wi-Fi is restored.
     """
     logging.info("Wi-Fi monitor thread started")
 
+    ap_running = False  # track AP state
+
     while True:
         try:
-            if not is_wifi_connected():
+            wifi_connected = is_wifi_connected()
+
+            if not wifi_connected and not ap_running:
+                logging.info("Wi-Fi down → starting AP")
                 start_ap()
+                ap_running = True
+
+            elif wifi_connected and ap_running:
+                logging.info("Wi-Fi restored → stopping AP")
+                stop_ap()
+                ap_running = False
+
         except Exception as e:
             logging.error(f"Wi-Fi monitor error: {e}")
 
@@ -112,7 +141,8 @@ def wifi_monitor():
 @app.post("/provision")
 def provision_wifi(creds: WifiCredentials):
     """
-    Receives Wi-Fi credentials, connects, disables AP.
+    Receives Wi-Fi credentials, connects, disables AP,
+    and sends device config to backend.
     """
 
     if not creds.ssid or not creds.password:
@@ -141,6 +171,7 @@ def provision_wifi(creds: WifiCredentials):
         if is_wifi_connected():
             stop_ap()
             clear_factory_reset_flag()
+            send_device_config()  # <-- send device config after Wi-Fi connects
             return {"status": "connected"}
 
         return {"error": "Wi-Fi connection failed"}
@@ -164,4 +195,3 @@ if __name__ == "__main__":
         port=8000,
         log_level="info"
     )
-

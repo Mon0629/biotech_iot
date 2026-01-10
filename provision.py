@@ -1,142 +1,167 @@
-#!/usr/bin/env python3
+from fastapi import FastAPI
+from pydantic import BaseModel
 import subprocess
-from fastapi import FastAPI, Request
-import uvicorn
-import json
+import time
+import threading
+import logging
 import os
+import uvicorn
 
-config_path = os.path.join(os.path.dirname(__file__), 'config', 'device_config.json')
+# ---------------- CONFIG ----------------
+
+WIFI_INTERFACE = "wlan0"
+AP_CONNECTION_NAME = "AP-setup"
+FACTORY_RESET_FLAG = "/boot/factory_reset"
+CHECK_INTERVAL = 10  # seconds
+
+# ---------------- APP ----------------
+
 app = FastAPI()
 
-HOTSPOT_NAME = "BIOTECH"
-HOTSPOT_PASSWORD = "momorevillame24"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-with open(config_path, 'r') as f:
-    device_config = json.load(f)
+# ---------------- MODELS ----------------
 
-print("Loaded device config:", device_config)
+class WifiCredentials(BaseModel):
+    ssid: str
+    password: str
 
+# ---------------- HELPERS ----------------
 
-def start_ap_mode():
-    """Start NetworkManager hotspot for provisioning."""
-    print("Starting AP Mode...")
+def run(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True)
 
-    existing = subprocess.run(
-        ["nmcli", "-t", "-f", "NAME", "connection", "show"],
-        capture_output=True, text=True
-    )
-    print("Existing connections:", existing.stdout.strip())
-
-    if HOTSPOT_NAME not in existing.stdout:
-        result = subprocess.run([
-            "nmcli", "device", "wifi", "hotspot",
-            "ifname", "wlan0",
-            "con-name", HOTSPOT_NAME,
-            "ssid", HOTSPOT_NAME,
-            "password", HOTSPOT_PASSWORD
-        ], capture_output=True, text=True)
-        print("Hotspot creation stdout:", result.stdout)
-        print("Hotspot creation stderr:", result.stderr)
-        print("Hotspot creation returncode:", result.returncode)
-    else:
-        result = subprocess.run(["nmcli", "connection", "up", HOTSPOT_NAME],
-                                capture_output=True, text=True)
-        print("Bringing hotspot up stdout:", result.stdout)
-        print("Bringing hotspot up stderr:", result.stderr)
-        print("Return code:", result.returncode)
-
-
-def stop_ap_mode():
-    """Stop hotspot."""
-    print("Stopping AP Mode...")
-    result = subprocess.run(["nmcli", "connection", "down", HOTSPOT_NAME],
-                            capture_output=True, text=True)
-    print("AP stop stdout:", result.stdout)
-    print("AP stop stderr:", result.stderr)
-    print("AP stop returncode:", result.returncode)
-
-
-def connect_to_wifi(ssid: str, password: str) -> bool:
-    """Connect Pi to WiFi using NetworkManager with detailed logging."""
-    print(f"Attempting to connect to WiFi SSID: {ssid}")
-
-    # Delete old config
-    del_result = subprocess.run(["nmcli", "connection", "delete", ssid],
-                                capture_output=True, text=True)
-    print(f"Deleted old connection '{ssid}' stdout:", del_result.stdout)
-    print(f"Deleted old connection '{ssid}' stderr:", del_result.stderr)
-
-    # Attempt connection
-    result = subprocess.run([
-        "nmcli", "device", "wifi", "connect", ssid,
-        "password", password, "ifname", "wlan0"
-    ], capture_output=True, text=True)
-
-    print("WiFi connect stdout:", result.stdout)
-    print("WiFi connect stderr:", result.stderr)
-    print("WiFi connect returncode:", result.returncode)
-
-    return result.returncode == 0
-
-
-def connect_to_wifi(ssid: str, password: str) -> bool:
-    """Connect Pi to WiFi using NetworkManager with detailed logging."""
-    print(f"Attempting to connect to WiFi SSID: '{ssid}'")
-
-    # Delete old config if it exists
-    del_result = subprocess.run(
-        ["nmcli", "connection", "delete", ssid],
-        capture_output=True, text=True
-    )
-    print(f"Deleted old connection '{ssid}' stdout:\n{del_result.stdout}")
-    print(f"Deleted old connection '{ssid}' stderr:\n{del_result.stderr}")
-
-    # Attempt connection
-    result = subprocess.run(
-        ["nmcli", "-f", "ALL", "device", "wifi", "connect", ssid, "password", password, "ifname", "wlan0"],
-        capture_output=True, text=True
+def is_wifi_connected() -> bool:
+    result = run(["nmcli", "-t", "-f", "DEVICE,STATE", "dev"])
+    return any(
+        line.startswith(f"{WIFI_INTERFACE}:connected")
+        for line in result.stdout.splitlines()
     )
 
-    print("===== WiFi connection attempt =====")
-    print("STDOUT:\n", result.stdout)
-    print("STDERR:\n", result.stderr)
-    print("Return code:", result.returncode)
-    print("=================================")
+def has_saved_wifi() -> bool:
+    """
+    Returns True if at least one non-AP Wi-Fi profile exists.
+    """
+    result = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
+    for line in result.stdout.splitlines():
+        if line.endswith(":wifi") and not line.startswith(AP_CONNECTION_NAME):
+            return True
+    return False
 
-    if result.returncode != 0:
-        # If it fails, run `nmcli` general status to give full debug info
-        status = subprocess.run(["nmcli", "device", "status"], capture_output=True, text=True)
-        print("Device status after failed connection:\n", status.stdout)
+def start_ap():
+    logging.info("Starting AP mode")
+    subprocess.run(
+        ["nmcli", "connection", "up", AP_CONNECTION_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
-    return result.returncode == 0
+def stop_ap():
+    logging.info("Stopping AP mode")
+    subprocess.run(
+        ["nmcli", "connection", "down", AP_CONNECTION_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
+def clear_factory_reset_flag():
+    if os.path.exists(FACTORY_RESET_FLAG):
+        os.remove(FACTORY_RESET_FLAG)
+        logging.info("Factory reset flag cleared")
+
+# ---------------- STARTUP LOGIC ----------------
+
+def startup_logic():
+    """
+    Decide whether AP should start at boot.
+    """
+    if os.path.exists(FACTORY_RESET_FLAG):
+        logging.info("Factory reset flag detected → AP enabled")
+        start_ap()
+        return
+
+    if not has_saved_wifi():
+        logging.info("No saved Wi-Fi profiles → AP enabled")
+        start_ap()
+        return
+
+    logging.info("Saved Wi-Fi exists → AP not started")
+
+# ---------------- MONITOR THREAD ----------------
+
+def wifi_monitor():
+    """
+    If Wi-Fi drops at runtime, AP is enabled.
+    """
+    logging.info("Wi-Fi monitor thread started")
+
+    while True:
+        try:
+            if not is_wifi_connected():
+                start_ap()
+        except Exception as e:
+            logging.error(f"Wi-Fi monitor error: {e}")
+
+        time.sleep(CHECK_INTERVAL)
+
+# ---------------- API ----------------
 
 @app.post("/provision")
-async def provision_wifi(request: Request):
-    data = await request.json()
-    ssid = data.get("ssid")
-    password = data.get("password")
-    pairing_token = data.get("pairing_token")
+def provision_wifi(creds: WifiCredentials):
+    """
+    Receives Wi-Fi credentials, connects, disables AP.
+    """
 
-    if not ssid or not password:
-        return {"status": "error", "message": "SSID and password required"}
+    if not creds.ssid or not creds.password:
+        return {"error": "SSID and password required"}
 
-    device_info = switch_wifi(ssid, password, pairing_token)
-    return device_info
+    try:
+        logging.info(f"Provisioning Wi-Fi: {creds.ssid}")
 
+        subprocess.run(
+            [
+                "nmcli",
+                "dev",
+                "wifi",
+                "connect",
+                creds.ssid,
+                "password",
+                creds.password,
+                "ifname",
+                WIFI_INTERFACE
+            ],
+            check=True
+        )
+
+        time.sleep(5)
+
+        if is_wifi_connected():
+            stop_ap()
+            clear_factory_reset_flag()
+            return {"status": "connected"}
+
+        return {"error": "Wi-Fi connection failed"}
+
+    except subprocess.CalledProcessError:
+        return {"error": "Invalid credentials or connection error"}
+
+# ---------------- MAIN ----------------
 
 if __name__ == "__main__":
-    # Check if Pi is already on a WiFi network
-    check = subprocess.run(
-        ["nmcli", "-t", "-f", "DEVICE,STATE", "device"],
-        capture_output=True, text=True
+    startup_logic()
+
+    threading.Thread(
+        target=wifi_monitor,
+        daemon=True
+    ).start()
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info"
     )
-    wlan0_active = "wlan0:connected" in check.stdout
-    print("wlan0 status:", check.stdout.strip())
 
-    if not wlan0_active:
-        start_ap_mode()
-    else:
-        print("WiFi already connected. Skipping hotspot startup.")
-
-    uvicorn.run(app, host="0.0.0.0", port=5000)

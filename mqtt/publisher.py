@@ -1,18 +1,20 @@
-import os
-import time
-from mqtt.mqtt_client import init_mqtt, publish
-
-def publish_data():
-    
-    publish("valve/1", "OPEN")
-    print("[MQTT] Message Published")
+# scripts/publisher.py
+from .mqtt_client import init_mqtt, publish
+from data.data_collector import read_batches
 
 def main():
     client = init_mqtt()
-    print("MQTT Initialized")
-    
-    publish_data()
+    print("[MQTT] Initialized")
 
+    print("Listening for batches...")
+
+    for batch_json in read_batches():
+        print("[BATCH RECEIVED]")
+        print(batch_json)
+
+        publish("biotech_iot/sensor_data", batch_json)
+        print("[MQTT] Batch published\n")
 
 if __name__ == "__main__":
     main()
+

@@ -14,7 +14,7 @@ import requests
 WIFI_INTERFACE = "wlan0"
 FACTORY_RESET_FLAG = "/boot/factory_reset"
 CHECK_INTERVAL = 10  # seconds
-BACKEND_URL = "https://your-backend-domain.com/api/device-config"  # Replace with your Laravel endpoint
+BACKEND_URL = "https://auntlike-karrie-caboshed.ngrok-free.dev/api/v1/provision"  # Replace with your Laravel endpoint
 
 # ---------------- APP ----------------
 
@@ -30,6 +30,7 @@ logging.basicConfig(
 class WifiCredentials(BaseModel):
     ssid: str
     password: str
+    pairing_token: str
 
 # ---------------- HELPERS ----------------
 
@@ -66,27 +67,34 @@ def clear_factory_reset_flag():
         os.remove(FACTORY_RESET_FLAG)
         logging.info("Factory reset flag cleared")
 
-def send_device_config():
+def send_device_config(pairing_token: str):
     """
-    Sends device_config.json to backend after Wi-Fi is connected.
+    Send device_config.json to backend after successful Wi-Fi provisioning
     """
     config_path = os.path.join(os.path.dirname(__file__), "config", "device_config.json")
     if not os.path.exists(config_path):
-        logging.error("device_config.json not found")
+        logging.error("Device config not found, cannot send to backend")
         return
 
     with open(config_path, "r") as f:
-        config_data = json.load(f)
+        device_info = json.load(f)
+
+    payload = {
+        "pairing_token": pairing_token,
+        "serial_number": device_info["serial_number"],
+        "machine_name": device_info.get("machine_name"),
+        "model": device_info.get("model"),
+        "firmware_version": device_info.get("firmware_version"),
+    }
 
     try:
-        logging.info(f"Sending device config to backend at {BACKEND_URL}")
-        response = requests.post(BACKEND_URL, json=config_data, timeout=10)
+        response = requests.post(BACKEND_URL, json=payload, timeout=5)
         if response.status_code == 200:
-            logging.info("Device config sent successfully")
+            logging.info("Device info successfully sent to backend")
         else:
-            logging.error(f"Backend returned status {response.status_code}: {response.text}")
-    except requests.RequestException as e:
-        logging.error(f"Failed to send device config: {e}")
+            logging.error(f"Failed to send device info: {response.status_code} {response.text}")
+    except Exception as e:
+        logging.error(f"Error sending device info: {e}")
 
 # ---------------- STARTUP LOGIC ----------------
 
@@ -139,17 +147,17 @@ def wifi_monitor():
 # ---------------- API ----------------
 
 @app.post("/provision")
-def provision_wifi(creds: WifiCredentials):
+def provision_wifi(req: WifiCredentials):
     """
-    Receives Wi-Fi credentials, connects, disables AP,
-    and sends device config to backend.
+    Receives Wi-Fi credentials + pairing token, connects, disables AP, 
+    and sends device info to backend
     """
 
-    if not creds.ssid or not creds.password:
-        return {"error": "SSID and password required"}
+    if not req.ssid or not req.password or not req.pairing_token:
+        return {"error": "SSID, password, and pairing_token are required"}
 
     try:
-        logging.info(f"Provisioning Wi-Fi: {creds.ssid}")
+        logging.info(f"Provisioning Wi-Fi: {req.ssid}")
 
         subprocess.run(
             [
@@ -157,9 +165,9 @@ def provision_wifi(creds: WifiCredentials):
                 "dev",
                 "wifi",
                 "connect",
-                creds.ssid,
+                req.ssid,
                 "password",
-                creds.password,
+                req.password,
                 "ifname",
                 WIFI_INTERFACE
             ],
@@ -171,13 +179,21 @@ def provision_wifi(creds: WifiCredentials):
         if is_wifi_connected():
             stop_ap()
             clear_factory_reset_flag()
-            send_device_config()  # <-- send device config after Wi-Fi connects
+
+            # Send device info to backend asynchronously
+            threading.Thread(
+                target=send_device_config,
+                args=(req.pairing_token,),
+                daemon=True
+            ).start()
+
             return {"status": "connected"}
 
         return {"error": "Wi-Fi connection failed"}
 
     except subprocess.CalledProcessError:
         return {"error": "Invalid credentials or connection error"}
+
 
 # ---------------- MAIN ----------------
 

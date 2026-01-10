@@ -6,15 +6,13 @@ import threading
 import logging
 import os
 import uvicorn
-import json
-import requests
 
 # ---------------- CONFIG ----------------
 
 WIFI_INTERFACE = "wlan0"
+AP_CONNECTION_NAME = "AP-setup"
 FACTORY_RESET_FLAG = "/boot/factory_reset"
 CHECK_INTERVAL = 10  # seconds
-BACKEND_URL = "https://auntlike-karrie-caboshed.ngrok-free.dev/api/v1/provision"  # Replace with your Laravel endpoint
 
 # ---------------- APP ----------------
 
@@ -30,7 +28,6 @@ logging.basicConfig(
 class WifiCredentials(BaseModel):
     ssid: str
     password: str
-    pairing_token: str
 
 # ---------------- HELPERS ----------------
 
@@ -50,51 +47,30 @@ def has_saved_wifi() -> bool:
     """
     result = run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"])
     for line in result.stdout.splitlines():
-        if line.endswith(":wifi"):
+        if line.endswith(":wifi") and not line.startswith(AP_CONNECTION_NAME):
             return True
     return False
 
 def start_ap():
-    logging.info("Starting AP mode (hostapd)")
-    subprocess.run(["sudo", "systemctl", "start", "hostapd"], check=False)
+    logging.info("Starting AP mode")
+    subprocess.run(
+        ["nmcli", "connection", "up", AP_CONNECTION_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
 def stop_ap():
-    logging.info("Stopping AP mode (hostapd)")
-    subprocess.run(["sudo", "systemctl", "stop", "hostapd"], check=False)
+    logging.info("Stopping AP mode")
+    subprocess.run(
+        ["nmcli", "connection", "down", AP_CONNECTION_NAME],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
 def clear_factory_reset_flag():
     if os.path.exists(FACTORY_RESET_FLAG):
         os.remove(FACTORY_RESET_FLAG)
         logging.info("Factory reset flag cleared")
-
-def send_device_config(pairing_token: str):
-    """
-    Send device_config.json to backend after successful Wi-Fi provisioning
-    """
-    config_path = os.path.join(os.path.dirname(__file__), "config", "device_config.json")
-    if not os.path.exists(config_path):
-        logging.error("Device config not found, cannot send to backend")
-        return
-
-    with open(config_path, "r") as f:
-        device_info = json.load(f)
-
-    payload = {
-        "pairing_token": pairing_token,
-        "serial_number": device_info["serial_number"],
-        "machine_name": device_info.get("machine_name"),
-        "model": device_info.get("model"),
-        "firmware_version": device_info.get("firmware_version"),
-    }
-
-    try:
-        response = requests.post(BACKEND_URL, json=payload, timeout=5)
-        if response.status_code == 200:
-            logging.info("Device info successfully sent to backend")
-        else:
-            logging.error(f"Failed to send device info: {response.status_code} {response.text}")
-    except Exception as e:
-        logging.error(f"Error sending device info: {e}")
 
 # ---------------- STARTUP LOGIC ----------------
 
@@ -118,27 +94,14 @@ def startup_logic():
 
 def wifi_monitor():
     """
-    Monitors Wi-Fi. If Wi-Fi drops at runtime, starts AP automatically.
-    Stops AP when Wi-Fi is restored.
+    If Wi-Fi drops at runtime, AP is enabled.
     """
     logging.info("Wi-Fi monitor thread started")
 
-    ap_running = False  # track AP state
-
     while True:
         try:
-            wifi_connected = is_wifi_connected()
-
-            if not wifi_connected and not ap_running:
-                logging.info("Wi-Fi down → starting AP")
+            if not is_wifi_connected():
                 start_ap()
-                ap_running = True
-
-            elif wifi_connected and ap_running:
-                logging.info("Wi-Fi restored → stopping AP")
-                stop_ap()
-                ap_running = False
-
         except Exception as e:
             logging.error(f"Wi-Fi monitor error: {e}")
 
@@ -147,17 +110,16 @@ def wifi_monitor():
 # ---------------- API ----------------
 
 @app.post("/provision")
-def provision_wifi(req: WifiCredentials):
+def provision_wifi(creds: WifiCredentials):
     """
-    Receives Wi-Fi credentials + pairing token, connects, disables AP, 
-    and sends device info to backend
+    Receives Wi-Fi credentials, connects, disables AP.
     """
 
-    if not req.ssid or not req.password or not req.pairing_token:
-        return {"error": "SSID, password, and pairing_token are required"}
+    if not creds.ssid or not creds.password:
+        return {"error": "SSID and password required"}
 
     try:
-        logging.info(f"Provisioning Wi-Fi: {req.ssid}")
+        logging.info(f"Provisioning Wi-Fi: {creds.ssid}")
 
         subprocess.run(
             [
@@ -165,9 +127,9 @@ def provision_wifi(req: WifiCredentials):
                 "dev",
                 "wifi",
                 "connect",
-                req.ssid,
+                creds.ssid,
                 "password",
-                req.password,
+                creds.password,
                 "ifname",
                 WIFI_INTERFACE
             ],
@@ -179,21 +141,12 @@ def provision_wifi(req: WifiCredentials):
         if is_wifi_connected():
             stop_ap()
             clear_factory_reset_flag()
-
-            # Send device info to backend asynchronously
-            threading.Thread(
-                target=send_device_config,
-                args=(req.pairing_token,),
-                daemon=True
-            ).start()
-
             return {"status": "connected"}
 
         return {"error": "Wi-Fi connection failed"}
 
     except subprocess.CalledProcessError:
         return {"error": "Invalid credentials or connection error"}
-
 
 # ---------------- MAIN ----------------
 

@@ -44,3 +44,9 @@ def read_batches():
                 "hydroponics_water": None
             }
 
+def main():
+    print("Starting data collector...")
+    read_batches()
+
+if __name__ == "__main__":
+    main()

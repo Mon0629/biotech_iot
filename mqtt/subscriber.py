@@ -1,41 +1,71 @@
-import os
 from .mqtt_client import init_mqtt, subscribe
-#from controls.controls import open_valve, close_valve, open_pump, close_pump
+from controls.controls import open_valve, close_valve, open_pump, close_pump
+from config import config
+
+SERIAL_NUMBER = config.SERIAL_NUMBER  # loaded from device_config.json
+
 
 def valve_callback(message, valve_number):
     print(f"[MQTT] valve/{valve_number} received: {message}")
     if message.upper() == "OPEN":
-       pass
-#        open_valve(valve_number)
+        open_valve(valve_number)
     elif message.upper() == "CLOSE":
-       pass
-#        close_valve(valve_number)
+        close_valve(valve_number)
+
 
 def pump_callback(message, pump_number):
     print(f"[MQTT] pump/{pump_number} received: {message}")
     if message.upper() == "OPEN":
-        pass
-#        open_pump(pump_number)
+        open_pump(pump_number)
     elif message.upper() == "CLOSE":
-        pass
-#        close_pump(pump_number)
+        close_pump(pump_number)
+
+
+def message_callback(message, topic):
+    """
+    Parses topic like hydroponics/<serial>/pump/1 or hydroponics/<serial>/valve/2
+    Calls correct callback dynamically
+    """
+    parts = topic.split("/")
+    if len(parts) != 4:
+        print(f"Malformed topic: {topic}")
+        return
+
+    _, serial, device_type, number = parts
+
+    # Only process messages for this device
+    if serial != SERIAL_NUMBER:
+        print(f"Ignoring message for {serial}, this device is {SERIAL_NUMBER}")
+        return
+
+    try:
+        device_number = int(number)
+    except ValueError:
+        print(f"Invalid device number in topic: {topic}")
+        return
+
+    if device_type.lower() == "pump":
+        pump_callback(message, device_number)
+    elif device_type.lower() == "valve":
+        valve_callback(message, device_number)
+    else:
+        print(f"Unknown device type in topic: {topic}")
+
 
 def main():
     client = init_mqtt()
 
-    subscribe("valve/1", lambda msg:valve_callback(msg, 1))
-    subscribe("valve/2", lambda msg:valve_callback(msg, 2))
-    subscribe("pump/1", lambda msg:pump_callback(msg, 1))
-    subscribe("pump/2", lambda msg:pump_callback(msg, 2))
-    
-    print("Subscriber Running...waiting for message")
+    # Subscribe to all pumps and valves for this device
+    subscribe(f"hydroponics/{SERIAL_NUMBER}/pump/+", message_callback)
+    subscribe(f"reservoir/{SERIAL_NUMBER}/+", message_callback)
+    subscribe(f"mfc/{SERIAL_NUMBER}/valve/+", message_callback)
+    subscribe(f"mfc_fallback/{SERIAL_NUMBER}/valve/+", message_callback)
 
-    import time
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Exiting")
+    print("Subscriber running...waiting for messages")
+    # loop_forever handles reconnects and keeps client alive
+    client.loop_forever()
+
 
 if __name__ == "__main__":
     main()
+

@@ -19,6 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 # ------------------------------------------------
 
+#BACKEND_API="hydronew.me/api/v1/devices/provision"
 #BACKEND_API = "https://auntlike-karrie-caboshed.ngrok-free.dev/api/v1/devices/provision"
 BACKEND_API = "https://latarsha-nonconcessive-telically.ngrok-free.dev/api/v1/devices/provision"
 
@@ -114,6 +115,67 @@ def is_client_wifi_connected() -> bool:
         ):
             return True
 
+    return False
+
+
+def get_saved_wifi_connections() -> list:
+    """
+    Get list of saved WiFi connections from NetworkManager (excluding the hotspot).
+    Returns a list of connection names that are WiFi type.
+    """
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show"],
+            capture_output=True,
+            text=True
+        )
+        saved_networks = []
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) >= 2:
+                name, conn_type = parts[0], parts[1]
+                # Include wifi connections but exclude the hotspot
+                if conn_type == "802-11-wireless" and name != HOTSPOT_NAME:
+                    saved_networks.append(name)
+        return saved_networks
+    except Exception as e:
+        logger.error("Error getting saved WiFi connections: %s", e)
+        return []
+
+
+def try_connect_saved_network(timeout: int = 15) -> bool:
+    """
+    Try to connect to a saved WiFi network.
+    Returns True if successfully connected, False otherwise.
+    """
+    saved_networks = get_saved_wifi_connections()
+    
+    if not saved_networks:
+        logger.info("No saved WiFi networks found")
+        return False
+    
+    logger.info("Found saved WiFi networks: %s", saved_networks)
+    
+    for network in saved_networks:
+        logger.info("Attempting to connect to saved network: %s", network)
+        result = subprocess.run(
+            ["nmcli", "connection", "up", network],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            logger.info("Successfully initiated connection to: %s", network)
+            # Wait for connection to be fully established
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if is_client_wifi_connected():
+                    logger.info("Connected to saved network: %s", network)
+                    return True
+                time.sleep(1)
+        else:
+            logger.warning("Failed to connect to %s: %s", network, result.stderr.strip())
+    
     return False
 
 
@@ -402,11 +464,24 @@ if __name__ == "__main__":
         except Exception:
             time.sleep(1)
 
-    if not is_client_wifi_connected():
-        logger.info("No known Wi-Fi found at boot — starting AP mode")
-        start_ap_mode(wait_until_up=True)
-    else:
+    # Check if already connected to WiFi
+    if is_client_wifi_connected():
         logger.info("Wi-Fi already connected. Skipping hotspot startup.")
+    else:
+        # Not connected - check if there are saved networks and try to connect
+        logger.info("Not currently connected to WiFi. Checking for saved networks...")
+        saved_networks = get_saved_wifi_connections()
+        
+        if saved_networks:
+            logger.info("Found saved networks: %s. Attempting to connect...", saved_networks)
+            if try_connect_saved_network(timeout=20):
+                logger.info("Successfully connected to a saved network. Skipping hotspot startup.")
+            else:
+                logger.info("Could not connect to any saved network — starting AP mode")
+                start_ap_mode(wait_until_up=True)
+        else:
+            logger.info("No saved Wi-Fi networks found — starting AP mode")
+            start_ap_mode(wait_until_up=True)
 
     threading.Thread(target=wifi_watchdog, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=5000)

@@ -1,6 +1,4 @@
-# scripts/serial_reader.py
 import serial
-import json
 from config import config
 
 def read_batches():
@@ -21,21 +19,21 @@ def read_batches():
             parts = raw.split(",")
             stage = parts[0]
 
-            values = {}
-            for item in parts[1:]:
-                key, value = item.split(":")
-                values[key] = float(value)
-
+            # Store the raw line as-is
             if stage in batch:
-                batch[stage] = values
+                batch[stage] = raw
 
         except Exception:
             continue
 
-        # All 3 stages complete → yield
+        # All 3 stages complete → yield as separate lines
         if all(batch.values()):
-            full_json = json.dumps(batch, indent=2)
-            yield full_json  # <-- send back to caller
+            combined = "\n".join([
+                batch["dirty_water"],
+                batch["clean_water"],
+                batch["hydroponics_water"]
+            ])
+            yield combined
 
             # reset for next cycle
             batch = {

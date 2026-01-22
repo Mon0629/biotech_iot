@@ -34,7 +34,12 @@ class SerialManager:
     def _connect(self):
         """Establish serial connection with retry logic"""
         try:
-            self.ser = serial.Serial(config.SERIAL_PORT, config.SERIAL_BAUD, timeout=1)
+            self.ser = serial.Serial(
+                config.SERIAL_PORT, 
+                config.SERIAL_BAUD, 
+                timeout=2,          # Increased read timeout for stability
+                write_timeout=1     # Write timeout to prevent blocking
+            )
             self.connected = True
             print("✓ Serial port connected (SerialManager)")
         except (serial.SerialException, AttributeError, TypeError) as e:
@@ -54,7 +59,12 @@ class SerialManager:
         time.sleep(2)
         
         try:
-            self.ser = serial.Serial(config.SERIAL_PORT, config.SERIAL_BAUD, timeout=1)
+            self.ser = serial.Serial(
+                config.SERIAL_PORT, 
+                config.SERIAL_BAUD, 
+                timeout=2,          # Increased read timeout for stability
+                write_timeout=1     # Write timeout to prevent blocking
+            )
             self.connected = True
             print("✓ Serial port reconnected!")
             return True
@@ -80,6 +90,8 @@ class SerialManager:
         Send a command to Arduino with thread safety
         Commands should be formatted as: "P1=1\n" or "V2=0\n"
         Returns: True if sent successfully, False otherwise
+        
+        Uses shared lock to prevent simultaneous read/write operations
         """
         if not self.connected or self.ser is None:
             print(f"⚠ Cannot send command: No serial connection")
@@ -92,6 +104,8 @@ class SerialManager:
                     command += '\n'
                 
                 self.ser.write(command.encode())
+                self.ser.flush()  # Force immediate transmission
+                time.sleep(0.05)  # Small delay for buffer to settle (50ms)
                 # Don't wait for response - Arduino response will be ignored
                 # This prevents timing delays and data corruption
                 return True
@@ -108,33 +122,36 @@ class SerialManager:
         Read a single line from Arduino
         Returns: decoded string or None if failed
         Filters out command acknowledgments to prevent data corruption
+        
+        Uses shared lock to prevent simultaneous read/write operations
         """
         if not self.connected or self.ser is None:
             return None
         
-        try:
-            raw = self.ser.readline().decode().strip()
-            if not raw:
-                return None
-            
-            # Filter out command acknowledgments (V1 ON, P2 OFF, etc.)
-            # These don't match sensor data format and should be ignored
-            if raw.endswith(" ON") or raw.endswith(" OFF"):
-                # This is a command acknowledgment, skip it
-                return None
-            
-            # Filter out error messages
-            if raw.startswith("ERR "):
-                return None
+        with self._write_lock:  # Share the same lock for thread safety
+            try:
+                raw = self.ser.readline().decode().strip()
+                if not raw:
+                    return None
                 
-            return raw
-        except serial.SerialException as e:
-            print(f"Serial connection lost: {e}")
-            self.connected = False
-            return None
-        except Exception as e:
-            print(f"Read error: {e}")
-            return None
+                # Filter out command acknowledgments (V1 ON, P2 OFF, etc.)
+                # These don't match sensor data format and should be ignored
+                if raw.endswith(" ON") or raw.endswith(" OFF"):
+                    # This is a command acknowledgment, skip it
+                    return None
+                
+                # Filter out error messages
+                if raw.startswith("ERR "):
+                    return None
+                    
+                return raw
+            except serial.SerialException as e:
+                print(f"Serial connection lost: {e}")
+                self.connected = False
+                return None
+            except Exception as e:
+                print(f"Read error: {e}")
+                return None
     
     def read_batches(self):
         """

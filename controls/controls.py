@@ -6,15 +6,15 @@ def control_device(device_type, number, state):
     number: Valve 1 or valve 2  
     """
     if not serial_manager.connected:
-        print(f"Cannot control {device_type}{number}: No serial connection")
+        print(f"⚠ Cannot control {device_type}{number}: No serial connection")
         return
     
     # Format command for Arduino: P1=1, V2=0, etc.
     cmd = f"{device_type}{number}={'1' if state else '0'}"
-    response = serial_manager.write_command(cmd)
+    success = serial_manager.write_command(cmd)
     
-    if response:
-        print(f"[Arduino] {response}")
+    if not success:
+        print(f"✗ Failed to send command {cmd}")
 
 def open_valve(number):
     control_device('V', number, True)

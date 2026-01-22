@@ -79,11 +79,11 @@ class SerialManager:
         """
         Send a command to Arduino with thread safety
         Commands should be formatted as: "P1=1\n" or "V2=0\n"
-        Returns: response from Arduino or None if failed
+        Returns: True if sent successfully, False otherwise
         """
         if not self.connected or self.ser is None:
             print(f"⚠ Cannot send command: No serial connection")
-            return None
+            return False
         
         with self._write_lock:
             try:
@@ -92,30 +92,42 @@ class SerialManager:
                     command += '\n'
                 
                 self.ser.write(command.encode())
-                time.sleep(0.2)  # Give Arduino time to process
-                
-                # Read response (non-blocking)
-                response = self.ser.readline().decode().strip()
-                return response
+                # Don't wait for response - Arduino response will be ignored
+                # This prevents timing delays and data corruption
+                return True
             except serial.SerialException as e:
                 print(f"✗ Serial write error: {e}")
                 self.connected = False
-                return None
+                return False
             except Exception as e:
                 print(f"✗ Unexpected error during write: {e}")
-                return None
+                return False
     
     def read_line(self):
         """
         Read a single line from Arduino
         Returns: decoded string or None if failed
+        Filters out command acknowledgments to prevent data corruption
         """
         if not self.connected or self.ser is None:
             return None
         
         try:
             raw = self.ser.readline().decode().strip()
-            return raw if raw else None
+            if not raw:
+                return None
+            
+            # Filter out command acknowledgments (V1 ON, P2 OFF, etc.)
+            # These don't match sensor data format and should be ignored
+            if raw.endswith(" ON") or raw.endswith(" OFF"):
+                # This is a command acknowledgment, skip it
+                return None
+            
+            # Filter out error messages
+            if raw.startswith("ERR "):
+                return None
+                
+            return raw
         except serial.SerialException as e:
             print(f"Serial connection lost: {e}")
             self.connected = False

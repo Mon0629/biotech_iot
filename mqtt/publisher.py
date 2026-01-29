@@ -25,7 +25,7 @@ def main():
             message = f"device_serial_number:{config.SERIAL_NUMBER}\n{batch_data}"
             
             # Publish with QoS 1 for guaranteed delivery
-            publish(f"biotech/{config.SERIAL_NUMBER}/sensor_data", message, QoS=1)
+            publish(f"hydronew/ai/classification", message, QoS=1)
             print(f"[{time.strftime('%H:%M:%S')}] ✓ Batch published to MQTT\n")
     except KeyboardInterrupt:
         print("\nPublisher shutting down...")

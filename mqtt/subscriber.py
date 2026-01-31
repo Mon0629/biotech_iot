@@ -1,36 +1,68 @@
-from .mqtt_client import init_mqtt, subscribe
+from .mqtt_client import init_mqtt, subscribe, publish
 from controls.controls import open_valve, close_valve, open_pump, close_pump
 from config import config
 
 SERIAL_NUMBER = config.SERIAL_NUMBER  # loaded from device_config.json
 
 
-def valve_callback(message, valve_number):
+def _publish_ack(topic, ack_message):
+    """Publish acknowledgment to topic/ack so clients know the command was executed."""
+    ack_topic = f"{topic.rstrip('/')}/ack"
+    publish(ack_topic, ack_message, QoS=1)
+
+
+def _publish_state(topic, state):
+    """Publish current device state to topic/state: 1 = open, 0 = closed."""
+    state_topic = f"{topic.rstrip('/')}/state"
+    publish(state_topic, state, QoS=1)
+
+
+def valve_callback(message, valve_number, topic):
     import time
     print(f"[{time.strftime('%H:%M:%S')}] valve/{valve_number} received: {message}")
     try:
         if message.upper() == "OPEN":
-            open_valve(valve_number)
-            print(f"✓ Valve {valve_number} opened")
+            success = open_valve(valve_number)
+            if success:
+                print(f"✓ Valve {valve_number} opened")
+                _publish_ack(topic, "1")
+                _publish_state(topic, "1")
+            else:
+                _publish_ack(topic, "0")
         elif message.upper() == "CLOSE":
-            close_valve(valve_number)
-            print(f"✓ Valve {valve_number} closed")
+            success = close_valve(valve_number)
+            if success:
+                print(f"✓ Valve {valve_number} closed")
+                _publish_ack(topic, "1")
+                _publish_state(topic, "0")
+            else:
+                _publish_ack(topic, "0")
         else:
             print(f"⚠ Unknown valve command: {message}")
     except Exception as e:
         print(f"✗ Error controlling valve {valve_number}: {e}")
 
 
-def pump_callback(message, pump_number):
+def pump_callback(message, pump_number, topic):
     import time
     print(f"[{time.strftime('%H:%M:%S')}] pump/{pump_number} received: {message}")
     try:
         if message.upper() == "OPEN":
-            open_pump(pump_number)
-            print(f"✓ Pump {pump_number} opened")
+            success = open_pump(pump_number)
+            if success:
+                print(f"✓ Pump {pump_number} opened")
+                _publish_ack(topic, "1")
+                _publish_state(topic, "1")
+            else:
+                _publish_ack(topic, "0")
         elif message.upper() == "CLOSE":
-            close_pump(pump_number)
-            print(f"✓ Pump {pump_number} closed")
+            success = close_pump(pump_number)
+            if success:
+                print(f"✓ Pump {pump_number} closed")
+                _publish_ack(topic, "1")
+                _publish_state(topic, "0")
+            else:
+                _publish_ack(topic, "0")
         else:
             print(f"⚠ Unknown pump command: {message}")
     except Exception as e:
@@ -65,9 +97,9 @@ def message_callback(message, topic):
     print(f"[{time.strftime('%H:%M:%S')}] Processing {device_type}/{device_number}: {message}")
     
     if device_type.lower() == "pump":
-        pump_callback(message, device_number)
+        pump_callback(message, device_number, topic)
     elif device_type.lower() == "valve":
-        valve_callback(message, device_number)
+        valve_callback(message, device_number, topic)
     else:
         print(f"⚠ Unknown device type '{device_type}' in topic: {topic}")
 

@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 BACKEND_API = "https://latarsha-nonconcessive-telically.ngrok-free.dev/api/v1/devices/provision"
 
 config_path = os.path.join(os.path.dirname(__file__), 'config', 'device_config.json')
+last_provision_result_path = os.path.join(os.path.dirname(__file__), 'config', 'last_provision_result.json')
 app = FastAPI()
 
 watchdog_enabled = True
 
 HOTSPOT_NAME = "BIOTECH"
 HOTSPOT_PASSWORD = "momorevillame24"
+
+# MQTT topic for remote WiFi change (payload: {"ssid": "...", "password": "..."})
+MQTT_TOPIC_WIFI_SET = "biotech/device/wifi/set"
 
 with open(config_path, 'r') as f:
     data = json.load(f)
@@ -286,6 +290,58 @@ def stop_ap_mode():
     wait_for_wlan_state("disconnected")
 
 
+def scan_ssids_while_ap() -> set[str] | None:
+    """
+    Scan for visible SSIDs without leaving AP mode (uses iw with ap-force).
+    Returns set of SSID strings, or None if scan failed (e.g. iw not available).
+    """
+    try:
+        result = subprocess.run(
+            ["iw", "dev", "wlan0", "scan", "ap-force"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            logger.warning("iw scan ap-force failed: %s", result.stderr.strip() or result.stdout)
+            return None
+        ssids = set()
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("SSID:"):
+                name = line[5:].strip()
+                if name:
+                    ssids.add(name)
+        return ssids
+    except FileNotFoundError:
+        logger.warning("iw not found; cannot scan while in AP mode")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("iw scan timed out")
+        return None
+    except Exception as e:
+        logger.exception("Scan while AP failed: %s", e)
+        return None
+
+
+def save_last_provision_result(result: dict):
+    """Persist last provision attempt for GET /provision/result after reconnect."""
+    os.makedirs(os.path.dirname(last_provision_result_path), exist_ok=True)
+    with open(last_provision_result_path, "w") as f:
+        json.dump(result, f, indent=2)
+    logger.info("Saved last provision result: %s", result)
+
+
+def load_last_provision_result() -> dict | None:
+    if not os.path.exists(last_provision_result_path):
+        return None
+    try:
+        with open(last_provision_result_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def connect_to_wifi(ssid: str, password: str) -> bool:
     print(f"Connecting to WiFi: {ssid}")
 
@@ -329,7 +385,7 @@ def send_device_config(pairing_token: str):
     with open(config_path, "r") as f:
         device_info = json.load(f)
 
-    payload = {
+    payload =  {
         "pairing_token": pairing_token,
         "serial_number": device_info["serial_number"],
         "machine_name": device_info.get("machine_name"),
@@ -353,7 +409,70 @@ def send_device_config(pairing_token: str):
         return False
 
 
+def switch_wifi_only(ssid: str, password: str) -> bool:
+    """
+    Switch device to the given WiFi (no backend/provisioning).
+    Use when in AP mode: drops AP, tries connect; on failure brings AP back.
+    """
+    global watchdog_enabled
+    logger.info("switch_wifi_only: switching to %s", ssid)
+    watchdog_enabled = False
+
+    stop_ap_mode()
+    wait_for_wlan_state("disconnected", timeout=10)
+
+    current_ssid = get_current_ssid()
+    if current_ssid == ssid:
+        logger.info("Already connected to %s", ssid)
+        watchdog_enabled = True
+        return True
+
+    success = connect_to_wifi(ssid, password)
+    if not success:
+        time.sleep(3)
+        success = connect_to_wifi(ssid, password)
+
+    if success:
+        logger.info("Connected to WiFi: %s", ssid)
+    else:
+        logger.error("Failed to connect to WiFi: %s", ssid)
+        start_ap_mode(wait_until_up=True)
+
+    watchdog_enabled = True
+    return success
+
+
+def switch_wifi_from_mqtt(ssid: str, password: str) -> bool:
+    """
+    Switch to another WiFi when device is already on WiFi (e.g. MQTT-triggered).
+    No backend call. No AP: on failure reconnects to a saved/known network.
+    """
+    logger.info("switch_wifi_from_mqtt: switching to %s", ssid)
+
+    current_ssid = get_current_ssid()
+    if current_ssid == ssid:
+        logger.info("Already connected to %s", ssid)
+        return True
+
+    success = connect_to_wifi(ssid, password)
+    if not success:
+        time.sleep(3)
+        success = connect_to_wifi(ssid, password)
+
+    if success:
+        logger.info("Connected to WiFi: %s", ssid)
+        return True
+
+    logger.warning("MQTT wifi switch failed; reconnecting to saved/known network")
+    if try_connect_saved_network(timeout=20):
+        logger.info("Reconnected to a saved network")
+        return False
+    logger.error("Could not reconnect to any saved network")
+    return False
+
+
 def switch_wifi(ssid: str, password: str, pairing_token: str):
+    """Switch to WiFi and send device config to backend (provisioning flow)."""
     global watchdog_enabled
     logger.info("Background task started: switch_wifi")
     print("Background task: switching WiFi...")
@@ -383,6 +502,7 @@ def switch_wifi(ssid: str, password: str, pairing_token: str):
     else:
         logger.error("Failed to connect to WiFi after retry: %s", ssid)
         print(f"Failed to connect to {ssid} after retry")
+        start_ap_mode(wait_until_up=True)
 
     watchdog_enabled = True
 
@@ -405,13 +525,25 @@ async def provision_wifi(request: Request):
             "message": "SSID, password, and pairing token are required"
         }
 
+    # Scan while AP is still up; if SSID not in range, return failed without dropping AP
+    visible = scan_ssids_while_ap()
+    if visible is not None and ssid not in visible:
+        logger.warning("SSID not found in scan: %s (visible: %s)", ssid, visible)
+        return {"status": "failed", "message": "Wifi not found"}
+
+    # SSID is there (or scan unavailable) — clear previous result, then drop AP and try connect
+    if os.path.exists(last_provision_result_path):
+        try:
+            os.remove(last_provision_result_path)
+        except OSError:
+            pass
+
     global watchdog_enabled
     watchdog_enabled = False  # temporarily stop watchdog
 
     stop_ap_mode()
     wait_for_wlan_state("disconnected", timeout=10)
 
-    # Try connecting to Wi-Fi
     success = connect_to_wifi(ssid, password)
     if not success:
         logger.warning("First Wi-Fi connection attempt failed — retrying once...")
@@ -419,8 +551,15 @@ async def provision_wifi(request: Request):
         success = connect_to_wifi(ssid, password)
 
     if not success:
+        save_last_provision_result({
+            "status": "failed",
+            "message": "Failed to connect. Wrong password or network unreachable.",
+            "ssid": ssid,
+        })
+        start_ap_mode(wait_until_up=True)
         watchdog_enabled = True
-        return {"status": "error", "message": f"Failed to connect to Wi-Fi {ssid}"}
+        # Client is disconnected; they can reconnect to hotspot and GET /provision/result
+        return {"status": "failed", "message": f"Failed to connect to Wi-Fi {ssid}"}
 
     # Connected — send config to backend and get response
     try:
@@ -451,6 +590,43 @@ async def provision_wifi(request: Request):
         "message": backend_message,
         "device": device_info
     }
+
+
+def _on_mqtt_wifi_set(message: str, topic: str):
+    """
+    Handle MQTT payload to change WiFi when device is already on WiFi.
+    Payload: JSON {"ssid": "...", "password": "..."}
+    Only runs when connected to WiFi; on failure reconnects to saved/known network (no AP).
+    """
+    try:
+        if not is_client_wifi_connected():
+            logger.info("MQTT wifi/set: ignored (device not on WiFi)")
+            return
+        data = json.loads(message)
+        ssid = data.get("ssid")
+        password = data.get("password") or ""
+        if not ssid:
+            logger.warning("MQTT wifi/set: missing ssid in payload")
+            return
+        logger.info("MQTT wifi/set: switching to %s", ssid)
+        # Run in thread so we don't block MQTT loop
+        threading.Thread(target=switch_wifi_from_mqtt, args=(ssid, password), daemon=True).start()
+    except json.JSONDecodeError as e:
+        logger.warning("MQTT wifi/set: invalid JSON %s", e)
+    except Exception as e:
+        logger.exception("MQTT wifi/set: %s", e)
+
+
+@app.get("/provision/result")
+async def get_provision_result():
+    """
+    Result of the last provision attempt. After a failed connect (e.g. wrong password),
+    the device brings the hotspot back; reconnect to BIOTECH and call this to get the error.
+    """
+    result = load_last_provision_result()
+    if result is None:
+        return {"status": "unknown", "message": "No previous provision attempt."}
+    return result
 
 
 if __name__ == "__main__":
@@ -484,5 +660,15 @@ if __name__ == "__main__":
             start_ap_mode(wait_until_up=True)
 
     threading.Thread(target=wifi_watchdog, daemon=True).start()
+
+    # MQTT subscriber for remote WiFi change (no backend call)
+    try:
+        from mqtt.mqtt_client import init_mqtt, subscribe as mqtt_subscribe
+        if init_mqtt() is not None:
+            mqtt_subscribe(MQTT_TOPIC_WIFI_SET, _on_mqtt_wifi_set)
+            logger.info("Subscribed to MQTT topic: %s", MQTT_TOPIC_WIFI_SET)
+    except Exception as e:
+        logger.warning("MQTT wifi subscriber not started: %s", e)
+
     uvicorn.run(app, host="0.0.0.0", port=5000)
 

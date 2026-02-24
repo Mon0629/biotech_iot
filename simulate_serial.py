@@ -14,7 +14,7 @@ def generate_sensor_data():
     # Dirty water: higher TDS, turbidity, lower pH
     dirty_water = (
         f"dirty_water,"
-        f"ph:{random.uniform(5, 9.0):.2f},"
+        f"ph:{random.uniform(5, 8.0):.2f},"
         f"tds:{random.uniform(250, 350):.2f},"
         f"turbidity:{random.uniform(10, 15):.2f},"
         f"water_level:{random.uniform(50, 60):.2f}"
@@ -23,16 +23,16 @@ def generate_sensor_data():
     # Clean water: lower TDS, turbidity, neutral pH
     clean_water = (
         f"clean_water,"
-        f"ph:{random.uniform(5.0, 9.0):.2f},"
+        f"ph:{random.uniform(5.0, 8.0):.2f},"
         f"tds:{random.uniform(100, 150):.2f},"
-        f"turbidity:{random.uniform(2, 5):.2f},"
+        f"turbidity:{random.uniform(6, 10):.2f},"
         f"water_level:{random.uniform(75, 85):.2f}"
     )
     
     # Hydroponics water: high TDS (nutrients), slightly acidic pH
     hydroponics_water = (
         f"hydroponics_water,"
-        f"ph:{random.uniform(6.0, 6.5):.2f},"
+        f"ph:{random.uniform(5.4, 6.6):.2f},"
         f"tds:{random.uniform(800, 900):.2f},"
         f"humidity:{random.uniform(55, 65):.2f},"
         f"ec:{random.uniform(950, 1100):.2f}"

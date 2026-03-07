@@ -7,37 +7,32 @@ import threading
 import subprocess
 
 HEARTBEAT_TOPIC = "biotech/{serial}/heartbeat"
-WIFI_TOPIC = "biotech/{serial}/wifi"
 HEARTBEAT_INTERVAL = 45  # seconds
+HOTSPOT_NAME = "BIOTECH"
 
 
-def _heartbeat_loop(serial_number: str, stop_event: threading.Event):
-    """Publish '1' (online) to heartbeat topic every HEARTBEAT_INTERVAL seconds."""
-    topic = HEARTBEAT_TOPIC.format(serial=serial_number)
-    while not stop_event.wait(timeout=HEARTBEAT_INTERVAL):
-        publish(topic, "1", QoS=1)
-
-
-def get_current_wifi_ssid() -> str | None:
-    """
-    Return the SSID wlan0 is currently connected to, or None if disconnected.
-    Uses NetworkManager via nmcli (Linux target device).
-    """
+def is_ap_active() -> bool:
+    """True if the BIOTECH hotspot is active (device in AP mode, no internet)."""
     try:
         result = subprocess.run(
-            ["nmcli", "-t", "-f", "DEVICE,STATE,CONNECTION", "device", "status"],
+            ["nmcli", "-t", "-f", "NAME,DEVICE", "connection", "show", "--active"],
             capture_output=True,
             text=True,
         )
-        for line in result.stdout.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) >= 3 and parts[0] == "wlan0":
-                state, conn = parts[1], parts[2]
-                if state == "connected":
-                    return conn
-        return None
+        return any(
+            line.startswith(HOTSPOT_NAME + ":")
+            for line in result.stdout.splitlines()
+        )
     except Exception:
-        return None
+        return False
+
+
+def _heartbeat_loop(serial_number: str, stop_event: threading.Event):
+    """Publish '1' (online) to heartbeat topic every 45 seconds when not in AP mode."""
+    topic = HEARTBEAT_TOPIC.format(serial=serial_number)
+    while not stop_event.wait(timeout=HEARTBEAT_INTERVAL):
+        if not is_ap_active():
+            publish(topic, "1", QoS=1)
 
 
 def main():
@@ -48,11 +43,6 @@ def main():
 
     serial_number = config.SERIAL_NUMBER
     heartbeat_topic = HEARTBEAT_TOPIC.format(serial=serial_number)
-    wifi_topic = WIFI_TOPIC.format(serial=serial_number)
-
-    # Publish online and current WiFi once at startup
-    publish(heartbeat_topic, "1", QoS=1)
-    publish(wifi_topic, get_current_wifi_ssid() or "", QoS=1)
 
     stop_heartbeat = threading.Event()
     heartbeat_thread = threading.Thread(
@@ -65,9 +55,8 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"✓ Publisher running for device: {serial_number}")
+    print(f"✓ Heartbeat every {HEARTBEAT_INTERVAL}s → {heartbeat_topic}")
     print(f"✓ Publishing sensor data with QoS 1 (guaranteed delivery)")
-    print(f"✓ Heartbeat every {HEARTBEAT_INTERVAL}s → {heartbeat_topic} (1=online, 0=offline)")
-    print(f"✓ WiFi name every {HEARTBEAT_INTERVAL}s → {wifi_topic}")
     print(f"{'='*60}\n")
 
     print("Listening for serial data batches...")

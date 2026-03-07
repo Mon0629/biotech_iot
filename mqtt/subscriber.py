@@ -115,7 +115,8 @@ def main():
     # Subscribe to all pumps and valves for this device
     subscribe(f"mfc/{SERIAL_NUMBER}/pump/+", message_callback)
     subscribe(f"hydroponics/{SERIAL_NUMBER}/pump/+", message_callback)
-    subscribe(f"reservoir_fallback/{SERIAL_NUMBER}/pump/+", message_callback)  # Fixed: added missing /
+    subscribe(f"reservoir_fallback/{SERIAL_NUMBER}/pump/+", message_callback)
+    subscribe(f"reservoir/{SERIAL_NUMBER}/pump/+", message_callback)
     subscribe(f"mfc/{SERIAL_NUMBER}/valve/+", message_callback)
     subscribe(f"mfc_fallback/{SERIAL_NUMBER}/valve/+", message_callback)
 

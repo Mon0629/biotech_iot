@@ -155,8 +155,16 @@ class SerialManager:
     
     def read_batches(self):
         """
-        Generator that yields complete sensor data batches
-        Handles reconnection automatically
+        Generator that yields sensor data batches.
+
+        Behavior:
+        - Arduino prints between 1 and 3 stage lines per cycle:
+          dirty_water, clean_water, hydroponics_water
+        - We group together all stage lines that arrive in the same cycle.
+        - If only one or two stages are printed (because of level thresholds),
+          we still yield a batch with just those lines.
+        - Batches are separated by idle periods on the serial line (read timeout)
+          or when all 3 stages have been seen.
         """
         self.wait_for_connection()
         
@@ -168,26 +176,44 @@ class SerialManager:
         
         while True:
             raw = self.read_line()
-            
+
             # Handle disconnection
-            if raw is None and not self.connected:
-                self.reconnect()
+            if raw is None:
+                if not self.connected:
+                    self.reconnect()
+                    continue
+
+                # Timeout / idle period but still connected:
+                # if we have at least one stage collected, flush it as a batch.
+                if any(batch.values()):
+                    combined_lines = [
+                        line for key, line in batch.items() if line is not None
+                    ]
+                    if combined_lines:
+                        yield "\n".join(combined_lines)
+
+                    # Reset for next cycle
+                    batch = {
+                        "dirty_water": None,
+                        "clean_water": None,
+                        "hydroponics_water": None
+                    }
                 continue
-            
+
             if not raw:
                 continue
-            
+
             try:
                 parts = raw.split(",")
                 stage = parts[0]
-                
+
                 # Store the raw line as-is
                 if stage in batch:
                     batch[stage] = raw
             except Exception:
                 continue
-            
-            # All 3 stages complete → yield as separate lines
+
+            # All 3 stages complete → yield as separate lines immediately
             if all(batch.values()):
                 combined = "\n".join([
                     batch["dirty_water"],
@@ -195,7 +221,7 @@ class SerialManager:
                     batch["hydroponics_water"]
                 ])
                 yield combined
-                
+
                 # Reset for next cycle
                 batch = {
                     "dirty_water": None,
